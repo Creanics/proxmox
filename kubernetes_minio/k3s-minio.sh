@@ -9,9 +9,9 @@ STORAGE="local-lvm"
 BRIDGE="vmbr0"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa.pub"
 
-MASTER_ID=200
+MASTER_ID=100
 MASTER_NAME="k3s-master"
-WORKER_BASE_ID=210
+WORKER_BASE_ID=110
 WORKER_COUNT=2
 
 VM_CPUS=2
@@ -27,15 +27,26 @@ function create_vm() {
 
   echo "[+] Création de la VM $name (ID: $id)..."
 
+  if ! qm status $TEMPLATE_ID &>/dev/null; then
+    echo "[x] Le template avec l'ID $TEMPLATE_ID est introuvable."
+    exit 1
+  fi
+
   qm clone $TEMPLATE_ID $id --name $name --full true --storage $STORAGE
+
+  qm stop $id 2>/dev/null || true
+  sleep 2
+
   qm set $id \
     --memory $VM_RAM \
     --cores $VM_CPUS \
     --net0 virtio,bridge=$BRIDGE \
     --ciuser ubuntu \
-    --sshkey "$SSH_KEY_PATH" \
+    --sshkeys "$SSH_KEY_PATH" \
     --ipconfig0 ip=dhcp
-  qm resize $id scsi0 ${VM_DISK}G
+
+  qm resize $id scsi0 +${VM_DISK}G || true
+
   qm start $id
 }
 
@@ -44,10 +55,11 @@ function get_vm_ip() {
   local ip=""
 
   echo "[...] Attente de l'IP pour VM $vmid..."
+
   for i in {1..30}; do
     ip=$(qm guest cmd "$vmid" network-get-interfaces 2>/dev/null | jq -r '.[]."ip-addresses"[]."ip-address"' | grep -E '^192\.|^10\.|^172\.' || true)
     if [[ -n "$ip" ]]; then
-      echo "[✓] IP détectée : $ip"
+      echo "[✓] IP détectée pour VM $vmid : $ip"
       echo "$ip"
       return
     fi
@@ -129,14 +141,21 @@ spec:
     - name: api
       port: 9000
       targetPort: 9000
+      nodePort: 30090
     - name: console
       port: 9001
       targetPort: 9001
+      nodePort: 30091
 YAML
 EOF
 }
 
 ### MAIN ###
+
+if ! command -v jq &>/dev/null; then
+  echo "[x] La commande 'jq' est requise sur l'hôte Proxmox. Installez-la avec : apt install -y jq"
+  exit 1
+fi
 
 echo "=== Déploiement K3s + MinIO sur Proxmox ==="
 
@@ -171,4 +190,7 @@ deploy_minio
 # 6. Fin
 echo ""
 echo "[✓] Cluster K3s + MinIO déployé avec succès !"
-echo "Accès MinIO : http://$K3S_MASTER_IP:<NodePort> (user: minioadmin / pass: minioadmin)"
+echo "Accès MinIO :"
+echo "  Console : http://$K3S_MASTER_IP:30091"
+echo "  API     : http://$K3S_MASTER_IP:30090"
+echo "  Login   : minioadmin / minioadmin"
