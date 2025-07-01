@@ -4,33 +4,49 @@ set -euo pipefail
 IFS=$'\n\t'
 
 ### CONFIGURATION ###
-TEMPLATE_ID=9000                 # ID du template Cloud-Init (Ubuntu 22.04)
+TEMPLATE_ID=9000
 STORAGE="local-lvm"
 BRIDGE="vmbr0"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa.pub"
-
-MASTER_ID=100
-MASTER_NAME="k3s-master"
-WORKER_BASE_ID=110
+VM_CPUS=2
+VM_RAM=4096
+VM_DISK=20
 WORKER_COUNT=2
 
-VM_CPUS=2
-VM_RAM=4096        # en MB
-VM_DISK=20         # en GB
+function find_next_vmid() {
+  local id=100
+  while qm status "$id" &>/dev/null; do
+    ((id++))
+  done
+  echo "$id"
+}
 
-K3S_MASTER_IP=""
-K3S_TOKEN=""
+function ensure_template_exists() {
+  if qm status $TEMPLATE_ID &>/dev/null; then
+    echo "[✓] Template $TEMPLATE_ID déjà présent."
+    return
+  fi
+
+  echo "[+] Création du template cloud-init Ubuntu 22.04 (ID: $TEMPLATE_ID)..."
+
+  wget -q https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img -O ubuntu-22.04.img
+
+  qm create $TEMPLATE_ID --name ubuntu-2204-template --memory 2048 --cores 2 --net0 virtio,bridge=$BRIDGE --ostype l26 --agent 1
+  qm importdisk $TEMPLATE_ID ubuntu-22.04.img $STORAGE
+  qm set $TEMPLATE_ID --scsihw virtio-scsi-pci --scsi0 ${STORAGE}:vm-${TEMPLATE_ID}-disk-0
+  qm set $TEMPLATE_ID --ide2 ${STORAGE}:cloudinit
+  qm set $TEMPLATE_ID --boot c --bootdisk scsi0
+  qm set $TEMPLATE_ID --serial0 socket --vga serial0
+  qm template $TEMPLATE_ID
+
+  rm -f ubuntu-22.04.img
+}
 
 function create_vm() {
   local id=$1
   local name=$2
 
   echo "[+] Création de la VM $name (ID: $id)..."
-
-  if ! qm status $TEMPLATE_ID &>/dev/null; then
-    echo "[x] Le template avec l'ID $TEMPLATE_ID est introuvable."
-    exit 1
-  fi
 
   qm clone $TEMPLATE_ID $id --name $name --full true --storage $STORAGE
 
@@ -151,7 +167,6 @@ EOF
 }
 
 ### MAIN ###
-
 if ! command -v jq &>/dev/null; then
   echo "[x] La commande 'jq' est requise sur l'hôte Proxmox. Installez-la avec : apt install -y jq"
   exit 1
@@ -159,38 +174,42 @@ fi
 
 echo "=== Déploiement K3s + MinIO sur Proxmox ==="
 
-# 1. Créer master
+ensure_template_exists
+
+# Créer master
+MASTER_ID=$(find_next_vmid)
+MASTER_NAME="k3s-master"
 create_vm "$MASTER_ID" "$MASTER_NAME"
 MASTER_IP=$(get_vm_ip "$MASTER_ID")
 
-# 2. Créer workers
+# Créer workers
 WORKER_IPS=()
+WORKER_IDS=()
 for i in $(seq 1 $WORKER_COUNT); do
-  ID=$((WORKER_BASE_ID + i))
-  NAME="k3s-worker-$i"
-  create_vm "$ID" "$NAME"
+  VMID=$(find_next_vmid)
+  WORKER_IDS+=("$VMID")
+  create_vm "$VMID" "k3s-worker-$i"
 done
 
-# 3. Attendre IPs des workers
-for i in $(seq 1 $WORKER_COUNT); do
-  ID=$((WORKER_BASE_ID + i))
-  IP=$(get_vm_ip "$ID")
-  WORKER_IPS+=("$IP")
+# Attendre les IPs
+for vmid in "${WORKER_IDS[@]}"; do
+  ip=$(get_vm_ip "$vmid")
+  WORKER_IPS+=("$ip")
 done
 
-# 4. Installer K3s
+# Installer K3s
 install_k3s_master "$MASTER_IP"
 for ip in "${WORKER_IPS[@]}"; do
   install_k3s_worker "$ip"
 done
 
-# 5. Déployer MinIO
+# Déployer MinIO
 deploy_minio
 
-# 6. Fin
+# Fin
 echo ""
 echo "[✓] Cluster K3s + MinIO déployé avec succès !"
 echo "Accès MinIO :"
-echo "  Console : http://$K3S_MASTER_IP:30091"
-echo "  API     : http://$K3S_MASTER_IP:30090"
+echo "  Console : http://$MASTER_IP:30091"
+echo "  API     : http://$MASTER_IP:30090"
 echo "  Login   : minioadmin / minioadmin"
