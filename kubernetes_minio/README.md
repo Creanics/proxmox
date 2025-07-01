@@ -6,5 +6,5 @@ Ce script crée les VM et installe des instances :
 
 Commande :
 ```bash
-bash -c "$(curl -fsSL https://github.com/Creanics/proxmox/kubernetes_minio/k3s-minio.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Creanics/proxmox/refs/heads/main/kubernetes_minio/k3s-minio.sh)"
 ```
